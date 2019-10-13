@@ -1,4 +1,3 @@
-------------------------------------------------------------------------
 ### Kaggle Used Car Dataset Price Prediction
 
 The Used Cars dataset from Kaggle has over 370K ads scraped with Scrapy
@@ -7,7 +6,6 @@ from Ebay-Kleinanzeigen.
 The objective of this task is to create a machine learning model to predict which of the cars listed in the future
 are cheap
 
-------------------------------------------------------------------------
 
 ### Steps to reproduce
 
