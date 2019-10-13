@@ -1,3 +1,6 @@
+*Please download the README.html file as it has the details of the process and also model evaluation*
+
+
 ### Kaggle Used Car Dataset Price Prediction
 
 The Used Cars dataset from Kaggle has over 370K ads scraped with Scrapy
@@ -21,4 +24,3 @@ are cheap
 4.  Knit the `README.Rmd` for model evaluation and
     prediction
 
-*The README.html file has the output of the model evaluation and predictions*
