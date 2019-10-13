@@ -1,0 +1,331 @@
+---
+title: "Used Car Price Prediction"
+author: "Amit Agni"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+
+
+if(!require(pacman)) { install.packages("pacman"); library(pacman)}
+p_load(data.table #data store and wrangling
+       ,here # alternative to setwd(), helps in project portabilty as it automatically constructs the file path based on the R project directory structure
+       ,magrittr # for the %>% piping operator
+       ,dplyr # for na_if() function
+       ,tictoc #display start-end times
+       ,DataExplorer #plotting functions
+       ,scales #for scale and center function
+       ,ROCR  #ROC computation 
+       ,plotROC #ROC plots
+       ,tidyr
+       ,purrr #Map
+       ,mlr # Machine learning library
+       ,ggplot2
+       ,kableExtra #table formating
+       ,vtreat # variable treatment
+       ,caret #for confusion matrix
+       )
+
+
+#Functions for data processing and modeling
+source(here::here("210_src_R-scripts-functions","functions_data-processing.R"))
+source(here::here("210_src_R-scripts-functions","functions_modeling.R"))
+
+
+
+
+```
+
+***
+
+### Objective
+
+The Used Cars dataset from Kaggle has over 370K ads scraped with Scrapy from Ebay-Kleinanzeigen. The objective of this task is to create a machine learning model to predict which of the cars listed in the future are cheap 
+
+***
+
+### Process
+
+The overall process that was followed is shown in the below diagram
+
+* The `autos.csv` file was modified to create an `is_cheap` column, which would be used as a **target** variable
+* The first 10000 rows were kept as held-out test set, rest were used for model building
+* The code was executed for 100 iterations. In every iteration :
+    + 1000 lines were read at random from the training set which were then processed using the data processing functions (`functions_data-processing.R`) 
+    + Three models were trained using glmnet (elastic net), Xgboost and Random forest algorithms (`functions_modeling.R`)
+    + Models were saved on the disk
+
+* This markdown document reads the saved models, evaluates their performance and creates prediction probabilities on the held-out test set
+
+![](`r here('400_extras','20191012_user-cars-process-map.png')`)
+
+
+***
+
+### Assumptions
+
+#### Data
+
+* The entire dataset was loaded in memory as the average price of the car was needed to create the `is_cheap` flag. (Alternative methods were not explored)
+   + This is the only part of the modeling code that doesn't obey the 1000 row limitation
+   + The columns nrOfPictures,seller and offerType either had only one value or did not have much variability and hence were dropped during the creation of `autos2.csv` file
+* Cars that were registered prior to year 1950 were capped to 1900 and 1950
+* Due to time constraints, only basic methods were utilised for missing value imputation, outlier treatment and feature engineering
+* Columns with textual information like model name, car name and brand name could possibly have had predictive power but were also not explored in depth for same reason
+* Cars with ad price of zero were included in the average price calculation. Excluding them would have made the dataset highly imbalanced
+
+
+#### Modeling 
+
+* Simple random grid was used for hyperparameter tuning. Algorithms like Bayesian Optimisation, Genetic Algorithm, etc could have given better results
+* Stratified K-fold CV was used, other resampling methods were not explored
+* AUC was used as the metric for CV evaluation. F-score (F1) was tried for few iterations but the results were not significantly different hence did not pursue
+* Error handling was included for the functions
+* `set.seed()` was used for reproducibility but may not give correct results due to the use of parallelisation 
+
+***
+
+### Steps to reproduce
+
+1. Clone the github repo : https://github.com/amit-agni/used-car-price-prediction.git
+2. Download `autos.csv` from [Kaggle](https://www.kaggle.com/orgesleka/used-cars-database) and save it in `100_data_raw-input` 
+3. Run the `main.R` script in the `210_src_R-scripts-functions` folder (If required, parameters like CV folds, Random grid rows and no of iterations can be modified in this file)
+    * This step creates all the models and saves them in `300_output`
+4. Knit the `README.Rmd` (this file) for model evaluation and prediction
+
+
+***
+
+### Cross Validation Performance
+
+* The below chart shows the performance of 5-fold Cross validation for the 100 iterations
+* The Random Forest model performed the worst, overfitting the train set with a median AUC of 0.93 and test set AUC of 0.65
+* The glmnet and XGB performed better than RF
+
+```{r}
+
+##Read models saved in the files and evaluate CV performance
+filenames <- list.files(path=here("300_output"),pattern="savedmodel_")
+
+DT_perf <- map(filenames,function(x) {
+    temp <- readRDS(here('300_output',x))
+    
+    rbindlist(map(temp,`[`,c('CV_train_auc','CV_test_auc')),idcol="model")
+}) %>% 
+    rbindlist() %>%
+    melt(.,id.vars = "model")
+
+DT_perf %>%
+  ggplot(aes(y=value,x=variable,color = variable)) +
+  geom_boxplot() +
+  facet_wrap(~model) +
+  ggtitle("Cross Validation AUC performance") +
+  xlab("") +
+  ylab("AUC") +
+  theme(panel.grid.minor = element_blank())
+
+```
+
+* The train and test AUC's for CV are given below :
+```{r}
+DT_perf[,.(median = median(value))
+        ,keyby = .(model,variable)] %>%
+    dcast(model~variable
+          ,value.var = "median") %>%
+    kable() %>%
+    kable_styling(bootstrap_options = 'condensed'
+                  ,full_width = F
+                  ,position = 'left') 
+
+
+```
+
+<br>
+
+
+### Held-out Validation Set Performance
+
+* There were total of 300 models generated (100 iterations x 3 algorithms). We will use all the 300 models to predict the held-out validation set probabilities. 
+
+```{r}
+#Extract models and predict on test set
+
+#Read and process 1000 lines from the held-out validation set  
+DT_test <- fread(here('100_data_raw-input','autos2.csv'),nrows = 10000) %>%
+    fn_data_processing_wrapper()
+
+# Apply the treatment plan to test
+treatplan <- readRDS(here('110_data_intermediate','vtreat-treatmentplan.Rds'))
+newvars <- setDT(treatplan$scoreFrame)[code %in% c("clean","lev")]$varName
+DT_test <- prepare(treatplan,DT_test,varRestriction = newvars)
+
+# create test task for the predict function
+test_task <- makeClassifTask(data=DT_test
+                               ,target = "is_cheap"
+                               ,positive = 1) 
+
+filenames <- list.files(path=here("300_output"),pattern="savedmodel_")
+
+
+DT_probs <- map(filenames,function(x) {
+
+    temp <- readRDS(here('300_output',x)) %>%
+        map(.,`[[`,'model')
+
+    map(temp[names(temp) %in% c("xgb","glmnet","rf")]
+      ,fn_predict
+      ,test_task = test_task)   %>%
+    #extract the prob data.table (as the fn_predict funtion return 2 datatables)
+    map(.,`[[`,2) %>%
+    rbindlist(.,idcol = "model")
+})
+
+
+```
+
+* Below chart gives an overview of the predicted probabilities for some random observations.
+* To limit the effect of outliers on the probabilities,  median (as opposed to mean) probability per observation would be used for evaluation/prediction
+
+```{r}
+set.seed(1)
+rbindlist(DT_probs)[obs_no %in% sample(1:1000,20)] %>%
+  ggplot(aes(x=factor(obs_no),y=probs)) +
+  geom_boxplot() +
+  facet_wrap(~model, scale="free") +
+  coord_flip() +
+  ggtitle("Predicted probabilities of some random observations") +
+  xlab("Observation No") +
+  ylab("Predicted probability") +
+  theme(panel.grid.minor = element_blank())
+
+
+#find median probabilities accross iterations
+DT_probs_median <- rbindlist(DT_probs)[,.(median_prob = median(probs))
+                         ,.(model,obs_no)]
+
+
+```
+
+<br>
+
+#### Gain Curve
+
+* The Gain Curve was plotted using the median probabilities across iterations. It shows that all the 3 models would perform better than a random clasffier (dotted line)
+* Also, as indicated in the CV - AUC chart above, glmnet and xgb models perform better than Random Forest model 
+* So, for the go-live model we will create a ensemble of both glmnet and xgb. The ensemble would further enhance the generalisation of the model
+
+```{r}
+
+
+gain_DT <- dcast(DT_probs_median,obs_no ~ model, value.var = "median_prob")
+gain_DT$is_cheap <- DT_test$is_cheap
+
+#helper function to create the ROCR object (tpr/rpp)
+fn_rocr <- function(x,labels){
+  rocr_pred <- ROCR::prediction(labels = labels,predictions = x)
+  rocr_perf <- ROCR::performance(rocr_pred, measure = "tpr","rpp")
+  rocr_perf
+}
+
+gain_DT <- map(gain_DT[,.(glmnet,xgb,rf)] ,fn_rocr, labels = gain_DT$is_cheap)
+
+cbind(map(gain_DT,pluck,"x.values") %>% 
+        rbindlist(.,idcol = "model") %>% 
+        setattr(.,'names',c("model","RPP"))
+      ,map(gain_DT,pluck,"y.values") %>% 
+        rbindlist() %>%
+        setattr(.,'names',c("TPR"))) %>%
+  ggplot() +
+  geom_line(aes(x=RPP,y=TPR,color = model)) +
+  geom_line(aes(x=x,y=y)
+               ,data = data.frame(x=c(0, 1, 1),y=c(0, 1, 1))
+            ,color = "chocolate"
+            ,linetype = "dotted") +
+    geom_line(aes(x=x,y=y)
+               ,data = data.frame(x=c(0, 1),y=c(0,1))
+            ,linetype = "dotted") +
+  xlab("Rate of positive predictions") +
+  ylab("True Positive Rate") +
+  scale_x_continuous(breaks = seq(0,1,0.1)) +
+  theme(panel.grid.minor = element_blank())
+
+
+
+
+
+
+```
+
+
+<br>
+
+#### Ensemble of glmnet and xgb
+
+* The median of the probabilities of all the 100 iterations of the xgb and glmnet model were used to create the ensemble
+* The resulting AUC on the 10000 row held-out validation set is 0.807
+
+```{r}
+
+probs <- rbindlist(DT_probs)[model %in% c("xgb","glmnet"),.(median_probs = median(probs))
+                  ,.(obs_no)][,median_probs]
+
+rocr_pred <- ROCR::prediction(labels = DT_test$is_cheap,predictions = probs)
+
+# ROC Curve
+rocplot <- ggplot() +
+  geom_roc(data=data.frame(predictions = probs,labels = DT_test$is_cheap)
+           ,aes(m = predictions, d = labels)
+           ,n.cuts=20,labels=T,labelround = 4, labelsize = 3,size=1, color = "chocolate4") +
+  ggtitle("ROC Curve with threshold cutoffs") +
+  ylab("True Positive Rate") +
+  xlab("False Positive Rate") +
+  theme(panel.grid.minor = element_blank()) +
+  scale_x_continuous(breaks = seq(0,1,0.1)) +
+  scale_y_continuous(breaks = seq(0,1,0.1)) +
+  geom_line(aes(x=x,y=y)
+            ,data = data.frame(x=c(0, 1),y=c(0,1))
+            ,linetype = "dotted") 
+
+direct_label(rocplot, labels = paste("AUC :",round(unlist(ROCR::performance(rocr_pred, measure = "auc")@y.values),3)), size = 4)
+
+
+```
+
+<br>
+
+#### Confusion Matrix
+
+* We will choose a threshold cutoff of **0.0325** which gives a good balance of Sensitivity (TPR) and Specificity (TNR) even though they are below par.
+
+* Out of the 311 car ads which were marked as Cheap in the held out validation set, the model correctly predicts 222 as cheap but also incorrectly predicts 2416 as cheap.
+  + This means the model can correctly predict only 8.5% of the times (Precision / PPV)
+
+* The model has a recall of 0.71 which indicates the model would be able to capture a wider breadth of cheap ads 
+
+* The choice of the cutoff would be highly dependent on the problem that the business is trying to solve. If for example the company wants to send mailers to ad posters than this model with higher breadth would be good, as there will not be any associated cost to the business. But if there is a associated cost then the 2416 False Positive cases will incur a cost that is not justified. 
+
+```{r}
+cutoff <-0.0325
+
+caret::confusionMatrix(data =factor(ifelse(probs>cutoff,1,0))
+                       ,factor(DT_test$is_cheap)
+                       ,positive = "1"
+                       ,mode = "everything")
+
+```
+
+
+### Summary
+
+* The glmnet and xgboost algorithms with a training AUC of 0.83 and 0.86 generalised well on the CV test set giving an AUC of approx 0.78
+* The ensembling further helped in generalisation as the validation set AUC came at 0.81
+* The model could be further improved by conducting in-depth feature engineering, hyperparameter tuning using optimation algorithms, alternative data/model sampling strategy, etc.
+
+***
+
