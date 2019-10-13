@@ -1,5 +1,6 @@
-*Please download the README.html file as it has the details of the process and also model evaluation*
+*Please download the README.html file as it has the details of the process that was followed and also the model evaluation*
 
+----
 
 ### Kaggle Used Car Dataset Price Prediction
 
