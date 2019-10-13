@@ -20,3 +20,5 @@ are cheap
     -   This step creates all the models and saves them in `300_output`
 4.  Knit the `README.Rmd` for model evaluation and
     prediction
+
+*The README.html file has the output of the model evaluation and predictions*
